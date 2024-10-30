@@ -1,3 +1,5 @@
+#TDS Project 1
+
 - I used a python code to scrape the data using my GitHub token from api.github.com and to clean the data.
 - It is interesting that SQL is one of the least popular programming languagues among the users and yet it has the highest average number of stars per repository.
 - The regression slope of followers on bio word count is negative, which means that the shorter the bio, the higher the followers, the developer would gain.
