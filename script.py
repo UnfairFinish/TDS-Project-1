@@ -1,112 +1,145 @@
-#Code for Scraping and Cleaning Data
 import requests
-import csv
+import pandas as pd
 import time
+import logging
+from typing import List, Dict, Any
 
-# GitHub API token
-GITHUB_TOKEN = 'MY_TOKEN'
-HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"}
+class GitHubScraper:
+    def __init__(self, token):
+        self.headers = {
+            'Authorization': f'token {token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        self.base_url = 'https://api.github.com'
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger(__name__)
 
-def clean_company_name(company):
-    if company:
-        company = company.strip().lstrip('@').upper()
-    return company
+    def _make_request(self, url: str, params: dict = None) -> Dict:
+        while True:
+            response = requests.get(url, headers=self.headers, params=params)
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 403:
+                reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
+                sleep_time = max(reset_time - time.time(), 0) + 1
+                self.logger.warning(f"Rate limit hit. Sleeping for {sleep_time} seconds")
+                time.sleep(sleep_time)
+            else:
+                self.logger.error(f"Error {response.status_code}: {response.text}")
+                response.raise_for_status()
 
-# Function to fetch users from the GitHub API
-def fetch_users(city="Boston", min_followers=100):
-    users = []
-    page = 1
+    def clean_company_name(self, company: str) -> str:
+        if not company:
+            return ""
+        cleaned = company.strip().lstrip('@')
+        return cleaned.upper()
 
-    while True:
-        url = f"https://api.github.com/search/users?q=location:{city}+followers:>{min_followers}&page={page}&per_page=100"
-        response = requests.get(url, headers=HEADERS)
-        data = response.json()
-        #print(data)
-        if 'items' not in data or not data['items']:
-            break
+    def search_users(self, location: str, min_followers: int) -> List[Dict]:
+        """
+        Search for GitHub users in a specific location with minimum followers.
+        """
+        users = []
+        page = 1
+        
+        while True:
+            self.logger.info(f"Fetching users page {page}")
+            
+            query = f"location:{location} followers:>={min_followers}"
+            params = {
+                'q': query,
+                'per_page': 100,
+                'page': page
+            }
+            
+            url = f"{self.base_url}/search/users"
+            response = self._make_request(url, params)
+            
+            if not response['items']:
+                break
+                
+            for user in response['items']:
+                user_data = self._make_request(user['url'])
+                cleaned_data = {
+                    'login': user_data['login'],
+                    'name': user_data['name'] if user_data['name'] else "",
+                    'company': self.clean_company_name(user_data.get('company')),
+                    'location': user_data['location'] if user_data['location'] else "",
+                    'email': user_data['email'] if user_data['email'] else "",
+                    'hireable': user_data['hireable'] if user_data['hireable'] is not None else False,
+                    'bio': user_data['bio'] if user_data['bio'] else "",
+                    'public_repos': user_data['public_repos'],
+                    'followers': user_data['followers'],
+                    'following': user_data['following'],
+                    'created_at': user_data['created_at']
+                }
+                
+                users.append(cleaned_data)
+                
+            page += 1
+            
+        return users
 
-        for user in data['items']:
-            user_url = user['url']
-            user_response = requests.get(user_url, headers=HEADERS)
-            user_data = user_response.json()
-            users.append({
-                'login': user_data['login'],
-                'name': user_data['name'],
-                'company': clean_company_name(user_data['company']),
-                'location': user_data['location'],
-                'email': user_data['email'],
-                'hireable': user_data['hireable'],
-                'bio': user_data['bio'],
-                'public_repos': user_data['public_repos'],
-                'followers': user_data['followers'],
-                'following': user_data['following'],
-                'created_at': user_data['created_at'],
-            })
-        page += 1
-        time.sleep(1)
-    return users
-
-def fetch_repositories(user_login):
-    repositories = []
-    page = 1
-
-    while True:
-        url = f"https://api.github.com/users/{user_login}/repos?per_page=100&page={page}"
-        response = requests.get(url, headers=HEADERS)
-        repo_data = response.json()
-
-        if not repo_data:
-            break
-
-        for repo in repo_data:
-            repositories.append({
-                'login': user_login,
-                'full_name': repo['full_name'],
-                'created_at': repo['created_at'],
-                'stargazers_count': repo['stargazers_count'],
-                'watchers_count': repo['watchers_count'],
-                'language': repo['language'],
-                'has_projects': repo['has_projects'],
-                'has_wiki': repo['has_wiki'],
-                'license_name': repo['license']['key'] if repo['license'] else None,
-            })
-
-        if len(repo_data) < 100:
-            break
-
-        page += 1  
-        time.sleep(1)  
-
-    return repositories
-
-def save_users_to_csv(users, filename="users.csv"):
-    with open(filename, mode="w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=users[0].keys())
-        writer.writeheader()
-        writer.writerows(users)
-
-def save_repositories_to_csv(repositories, filename="repositories.csv"):
-    with open(filename, mode="w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=repositories[0].keys())
-        writer.writeheader()
-        writer.writerows(repositories)
+    def get_user_repositories(self, username: str, max_repos: int = 500) -> List[Dict]:
+        repos = []
+        page = 1
+        
+        while len(repos) < max_repos:
+            self.logger.info(f"Fetching repositories for {username}, page {page}")
+            
+            params = {
+                'sort': 'pushed',
+                'direction': 'desc',
+                'per_page': 100,
+                'page': page
+            }
+            
+            url = f"{self.base_url}/users/{username}/repos"
+            response = self._make_request(url, params)
+            
+            if not response:
+                break
+                
+            for repo in response:
+                repo_data = {
+                    'login': username,  
+                    'full_name': repo['full_name'],
+                    'created_at': repo['created_at'],
+                    'stargazers_count': repo['stargazers_count'],
+                    'watchers_count': repo['watchers_count'],
+                    'language': repo['language'] if repo['language'] else "",
+                    'has_projects': repo['has_projects'],
+                    'has_wiki': repo['has_wiki'],
+                    'license_name': repo['license']['key'] if repo.get('license') else ""
+                }
+                
+                repos.append(repo_data)
+                
+            if len(response) < 100:
+                break
+                
+            page += 1
+            
+        return repos[:max_repos]
 
 def main():
-    print("Fetching users...")
-    users = fetch_users()
-    print(users)
-    save_users_to_csv(users)
-    print(f"Saved {len(users)} users to users.csv")
-
-    print("Fetching repositories...")
-    all_repositories = []
+    token = input("Enter your GitHub token: ").strip()
+    if not token:
+        print("Token is required. Exiting...")
+        return
+    scraper = GitHubScraper(token)
+    users = scraper.search_users(location='Boston', min_followers=100)
+    users_df = pd.DataFrame(users)
+    users_df.to_csv('users.csv', index=False)
+    all_repos = []
     for user in users:
-        user_repos = fetch_repositories(user["login"])
-        all_repositories.extend(user_repos)
-        print(f"Fetched {len(user_repos)} repositories for user {user['login']}")
-
-    save_repositories_to_csv(all_repositories)
-    print(f"Saved {len(all_repositories)} repositories to repositories.csv")
-
+        repos = scraper.get_user_repositories(user['login'])
+        all_repos.extend(repos)
+    repos_df = pd.DataFrame(all_repos)
+    repos_df.to_csv('repositories.csv', index=False)
+    print(f"Scraped {len(users)} users and {len(all_repos)} repositories")
 if __name__ == "__main__":
     main()
